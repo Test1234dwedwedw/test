@@ -1,4 +1,4 @@
-name: Start VPS
+name: Free VPS with GitHub Backup
 
 on:
   workflow_dispatch:
@@ -6,55 +6,37 @@ on:
     - cron: '0 */6 * * *'  # Auto restart every 6 hours
 
 jobs:
-  run-vps:
+  vps:
     runs-on: ubuntu-latest
     steps:
+      - name: Install tmate
+        run: |
+          sudo apt update
+          sudo apt install -y tmate git
 
-    - name: Set up Environment
-      run: |
-        sudo apt update
-        sudo apt install -y curl wget unzip nano
+      - name: Clone backup branch
+        run: |
+          git config --global user.name "GitHub VPS"
+          git config --global user.email "vps@example.com"
+          git clone --single-branch --branch backup https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }} vps-backup || mkdir vps-backup
+          mkdir -p ~/mydata
+          cp -r vps-backup/* ~/mydata || echo "No previous backup found."
 
-    - name: Restore backup from transfer.sh
-      run: |
-        if [ -f backup_link.txt ]; then
-          echo "Restoring backup..."
-          curl -L $(cat backup_link.txt) --output backup.zip
-          unzip -o backup.zip -d ~/mydata
-          echo "✅ Backup restored."
-        else
-          echo "⚠️ No backup_link.txt found."
-        fi
+      - name: Start tmate VPS
+        run: |
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "🔐 SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "🌐 Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+          sleep 21600  # 6 hours
 
-    - name: Start Cloudflared Tunnel
-      run: |
-        wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-        chmod +x cloudflared-linux-amd64
-        mv cloudflared-linux-amd64 cloudflared
-        ./cloudflared tunnel --url ssh://localhost:22 > tunnel.log 2>&1 &
-        sleep 5
-        echo "🌐 Cloudflared tunnel started."
-
-    - name: Start tmate Session (SSH VPS)
-      uses: mxschmitt/action-tmate@v3
-
-    - name: Zip and Upload to transfer.sh (Auto Backup)
-      if: always()
-      run: |
-        cd ~
-        mkdir -p ~/mydata
-        zip -r backup.zip ~/mydata
-        curl --upload-file ./backup.zip https://transfer.sh/backup.zip > backup_link.txt
-        echo "🔗 Backup Link: $(cat backup_link.txt)"
-
-    - name: Save Backup Link to Repo
-      if: always()
-      run: |
-        git config --global user.email "bot@example.com"
-        git config --global user.name "Backup Bot"
-        git clone https://github.com/${{ github.repository }} repo
-        cd repo
-        cp ~/backup_link.txt .
-        git add backup_link.txt
-        git commit -m "🆕 Updated backup link"
-        git push https://${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }} HEAD:main
+      - name: Push backup to GitHub
+        if: always()
+        run: |
+          cd ~/mydata
+          git init
+          git remote add origin https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}
+          git checkout -b backup
+          git add .
+          git commit -m "Auto backup $(date)"
+          git push -f origin backup
