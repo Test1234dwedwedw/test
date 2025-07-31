@@ -1,42 +1,84 @@
-name: Free VPS with GitHub Backup
+name: Free VPS with transfer.sh Backup + Stable Tailscale IP + tmate + Auto Update Secret
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'  # Auto restart every 6 hours
+    - cron: '0 */6 * * *'  # every 6 hours
 
 jobs:
   vps:
     runs-on: ubuntu-latest
     steps:
-      - name: Install tmate
+      - name: Install Tailscale
         run: |
-          sudo apt update
-          sudo apt install -y tmate git
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
 
-      - name: Clone backup branch
+      - name: Install tmate, git, curl, jq
         run: |
-          git config --global user.name "GitHub VPS"
-          git config --global user.email "vps@example.com"
-          git clone --single-branch --branch backup https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }} vps-backup || mkdir vps-backup
-          mkdir -p ~/mydata
-          cp -r vps-backup/* ~/mydata || echo "No previous backup found."
+          sudo apt-get update
+          sudo apt-get install -y tmate git curl jq tar
 
-      - name: Start tmate VPS
+      - name: Download backup from transfer.sh
+        if: ${{ secrets.TRANSFER_BACKUP_URL != '' }}
+        run: |
+          echo "Downloading backup archive..."
+          curl -o backup.tar.gz "${{ secrets.TRANSFER_BACKUP_URL }}"
+          tar xzf backup.tar.gz -C ~/
+        # skips if URL empty
+
+      - name: Show Tailscale IPv4
+        run: tailscale ip -4
+
+      - name: Start tmate VPS session
+        id: tmate
         run: |
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
           echo "🔐 SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
           echo "🌐 Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
-          sleep 21600  # 6 hours
+          sleep 21600  # 6 hours session
 
-      - name: Push backup to GitHub
-        if: always()
+      - name: Archive and upload backup to transfer.sh
+        id: upload
         run: |
-          cd ~/mydata
-          git init
-          git remote add origin https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}
-          git checkout -b backup
-          git add .
-          git commit -m "Auto backup $(date)"
-          git push -f origin backup
+          echo "Archiving mydata..."
+          tar czf backup.tar.gz ~/mydata
+          echo "Uploading to transfer.sh..."
+          url=$(curl --upload-file ./backup.tar.gz https://transfer.sh/backup.tar.gz)
+          echo "Backup uploaded: $url"
+          echo "::set-output name=backup_url::$url"
+
+      - name: Update TRANSFER_BACKUP_URL secret
+        if: always()
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+          NEW_URL: ${{ steps.upload.outputs.backup_url }}
+        run: |
+          echo "Updating TRANSFER_BACKUP_URL secret..."
+
+          # Get repo public key for encrypting secret
+          key_response=$(curl -s -H "Authorization: token $GH_PAT" \
+            "https://api.github.com/repos/$REPO/actions/secrets/public-key")
+          key_id=$(echo "$key_response" | jq -r '.key_id')
+          key=$(echo "$key_response" | jq -r '.key')
+
+          # Encrypt secret using public key with 'libsodium' (via python)
+          encrypted_value=$(python3 -c "
+import base64, sys, nacl.encoding, nacl.public
+def encrypt(public_key: str, secret_value: str) -> str:
+    public_key = nacl.public.PublicKey(public_key.encode('utf-8'), nacl.encoding.Base64Encoder())
+    sealed_box = nacl.public.SealedBox(public_key)
+    encrypted = sealed_box.encrypt(secret_value.encode('utf-8'))
+    return base64.b64encode(encrypted).decode('utf-8')
+print(encrypt('$key', '$NEW_URL'))
+")
+
+          # Update secret via GitHub API
+          curl -X PUT -H "Authorization: token $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/$REPO/actions/secrets/TRANSFER_BACKUP_URL \
+            -d "{\"encrypted_value\":\"$encrypted_value\",\"key_id\":\"$key_id\"}"
+
+          echo "TRANSFER_BACKUP_URL secret updated!"
