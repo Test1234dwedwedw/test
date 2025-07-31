@@ -1,4 +1,4 @@
-name: Free VPS with transfer.sh Backup + Stable Tailscale IP + tmate + Auto Update Secret
+name: Free VPS with GitHub Backup + Stable Tailscale IP + tmate
 
 on:
   workflow_dispatch:
@@ -14,25 +14,24 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
 
-      - name: Install tmate, git, curl, jq, tar, python3-pip
+      - name: Install tmate, git, curl, tar
         run: |
           sudo apt-get update
-          sudo apt-get install -y tmate git curl jq tar python3-pip
-          pip3 install pynacl
+          sudo apt-get install -y tmate git curl tar
 
-      - name: Download backup from transfer.sh
-        if: ${{ secrets.TRANSFER_BACKUP_URL != '' }}
+      - name: Clone backup branch and restore files
         run: |
-          echo "Downloading backup archive..."
-          curl -o backup.tar.gz "${{ secrets.TRANSFER_BACKUP_URL }}"
-          tar xzf backup.tar.gz -C ~/
-        # skips if URL empty
+          git config --global user.name "GitHub VPS"
+          git config --global user.email "vps@example.com"
+          # Try to clone backup branch, if not exists, create empty folder
+          git clone --single-branch --branch backup https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }} vps-backup || mkdir vps-backup
+          mkdir -p ~/mydata
+          cp -r vps-backup/* ~/mydata || echo "No previous backup found."
 
       - name: Show Tailscale IPv4
         run: tailscale ip -4
 
       - name: Start tmate VPS session
-        id: tmate
         run: |
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
@@ -40,49 +39,13 @@ jobs:
           echo "🌐 Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
           sleep 21600  # 6 hours session
 
-      - name: Archive and upload backup to transfer.sh
-        id: upload
+      - name: Archive and push backup to GitHub
         run: |
-          echo "Archiving mydata..."
-          tar czf backup.tar.gz ~/mydata
-          echo "Uploading to transfer.sh..."
-          url=$(curl --upload-file ./backup.tar.gz https://transfer.sh/backup.tar.gz)
-          echo "Backup uploaded: $url"
-          echo "::set-output name=backup_url::$url"
-
-      - name: Update TRANSFER_BACKUP_URL secret
-        if: always()
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-          REPO: ${{ github.repository }}
-          NEW_URL: ${{ steps.upload.outputs.backup_url }}
-        run: |
-          echo "Updating TRANSFER_BACKUP_URL secret..."
-
-          # Get repo public key for encrypting secret
-          key_response=$(curl -s -H "Authorization: token $GH_PAT" \
-            "https://api.github.com/repos/$REPO/actions/secrets/public-key")
-          key_id=$(echo "$key_response" | jq -r '.key_id')
-          key=$(echo "$key_response" | jq -r '.key')
-
-          # Encrypt secret using public key with 'libsodium' (via python)
-          encrypted_value=$(python3 - <<EOF
-import base64, nacl.encoding, nacl.public
-
-def encrypt(public_key: str, secret_value: str) -> str:
-    public_key = nacl.public.PublicKey(public_key.encode('utf-8'), nacl.encoding.Base64Encoder())
-    sealed_box = nacl.public.SealedBox(public_key)
-    encrypted = sealed_box.encrypt(secret_value.encode('utf-8'))
-    return base64.b64encode(encrypted).decode('utf-8')
-
-print(encrypt('$key', '$NEW_URL'))
-EOF
-          )
-
-          # Update secret via GitHub API
-          curl -X PUT -H "Authorization: token $GH_PAT" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/$REPO/actions/secrets/TRANSFER_BACKUP_URL \
-            -d "{\"encrypted_value\":\"$encrypted_value\",\"key_id\":\"$key_id\"}"
-
-          echo "TRANSFER_BACKUP_URL secret updated!"
+          cd ~
+          tar czf backup.tar.gz mydata
+          rm -rf vps-backup/*
+          tar xf backup.tar.gz -C vps-backup
+          cd vps-backup
+          git add .
+          git commit -m "Auto backup $(date)"
+          git push -f origin backup
