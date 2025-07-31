@@ -1,70 +1,87 @@
-name: VPS
+name: Free VPS with Stable Tailscale + tmate + Backup
 
 on:
-  repository_dispatch:
-    types: [create-vps]
+  workflow_dispatch:
 
 jobs:
-  ssh:
+  vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # 6 hours max
+
     steps:
-    
-    - name: Checkout
-      uses: actions/checkout@v3
+      - name: Checkout repo (for pushing backup)
+        uses: actions/checkout@v4
 
-    - name: Install tools
-      run: |
-        sudo apt update -y
-        sudo apt install -y openssh-server curl wget tar unzip net-tools lsof neofetch tmux
-        sudo apt install -y libvirt-clients libvirt-daemon-system qemu-kvm virtinst bridge-utils cloud-image-utils genisoimage
-        sudo systemctl enable ssh
-        sudo systemctl start ssh
+      - name: Set hostname to Biralo
+        run: |
+          sudo hostnamectl set-hostname Biralo
 
-    - name: Set hostname and default folder
-      run: |
-        echo "Biralo" | sudo tee /etc/hostname
-        sudo hostname Biralo
-        mkdir -p /home/runner/vps-data
-        echo 'cd /home/runner/vps-data' >> ~/.bashrc
+      - name: Create user 'biralo' with sudo and password access
+        run: |
+          sudo useradd -m -s /bin/bash biralo
+          echo "biralo:biralo" | sudo chpasswd
+          sudo usermod -aG sudo biralo
+          echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
 
-    - name: Install tmate & cloudflared
-      run: |
-        curl -sSL https://raw.githubusercontent.com/tsu-sh/vps/main/install.sh | bash
+      - name: Set default directory to /home/biralo/vps-data on login
+        run: |
+          sudo mkdir -p /home/biralo/vps-data
+          sudo chown -R biralo:biralo /home/biralo/vps-data
+          echo "cd ~/vps-data" | sudo tee -a /home/biralo/.bashrc
 
-    - name: Connect Tailscale (optional)
-      run: |
-        curl -fsSL https://tailscale.com/install.sh | sh
-        sudo tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname=biralo-vps || true
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
 
-    - name: Restore backup if exists
-      run: |
-        mkdir -p /home/runner/vps-data
-        if curl -s --head https://transfer.sh/biralo-backup.tar.gz | grep "200 OK" > /dev/null; then
-          curl -o /tmp/restore.tar.gz https://transfer.sh/biralo-backup.tar.gz
-          tar -xzf /tmp/restore.tar.gz -C /home/runner/vps-data
-          echo "✅ Backup restored!"
-        else
-          echo "⚠️ No backup found to restore."
-        fi
+      - name: Install tmate, git, curl, jq, tar
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmate git curl jq tar
 
-    - name: Start tmate session
-      run: |
-        echo "🔐 Connect using SSH or Web:"
-        echo "SSH will appear below shortly..."
-        tmate -F | tee /tmp/tmate.log &
-        sleep 10
-        grep -Eo 'ssh [^ ]+' /tmp/tmate.log > ssh.txt || true
-        grep -Eo 'https://tmate.io/t/[^ ]+' /tmp/tmate.log > web.txt || true
+      - name: Restore backup to /home/biralo/vps-data
+        run: |
+          wget -q https://raw.githubusercontent.com/${{ github.repository }}/backup/latest.txt -O latest.txt || echo "No backup link found"
+          if [ -s latest.txt ]; then
+            echo "Restoring backup..."
+            curl -sL $(cat latest.txt) | tar -xz -C /home/biralo/vps-data
+            sudo chown -R biralo:biralo /home/biralo/vps-data
+          else
+            echo "No backup to restore"
+          fi
 
-    - name: Print SSH link
-      run: |
-        echo "🔗 SSH: $(cat ssh.txt)"
-        echo "🌐 Web: $(cat web.txt)"
+      - name: Show stable Tailscale IPv4
+        run: sudo tailscale ip -4
 
-    - name: Backup every 5h55min
-      run: |
-        sleep 21300  # 5h55m = 21300 seconds
-        tar -czf /tmp/biralo-backup.tar.gz -C /home/runner vps-data
-        curl --upload-file /tmp/biralo-backup.tar.gz https://transfer.sh/biralo-backup.tar.gz > /tmp/backup-link.txt
-        echo "🧰 Backup uploaded: $(cat /tmp/backup-link.txt)"
+      - name: Start tmate session and keep VPS running
+        id: tmate-session
+        run: |
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          ssh=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          web=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          echo "ssh=$ssh" >> $GITHUB_OUTPUT
+          echo "web=$web" >> $GITHUB_OUTPUT
+          sleep $((5*3600 + 55*60))  # Keep alive
+
+      - name: Backup VPS data to transfer.sh
+        run: |
+          tar -czf /tmp/vps-backup.tar.gz -C /home/biralo/vps-data .
+          url=$(curl --upload-file /tmp/vps-backup.tar.gz https://transfer.sh/vps-backup.tar.gz)
+          echo "$url" > latest.txt
+
+      - name: Commit and push latest backup link
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git fetch origin backup || git checkout --orphan backup
+          git checkout backup || git checkout --orphan backup
+          mv latest.txt latest.txt
+          git add latest.txt
+          git commit -m "Update backup link $(date)"
+          git push --force origin backup
+
+      - name: Output tmate SSH & Web link
+        run: |
+          echo "✅ Your VPS is ready!"
+          echo "🔐 Tmate SSH: ${{ steps.tmate-session.outputs.ssh }}"
+          echo "🌐 Tmate Web: ${{ steps.tmate-session.outputs.web }}"
