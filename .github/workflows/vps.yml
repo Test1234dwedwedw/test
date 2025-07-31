@@ -14,7 +14,7 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
 
-      - name: Install tmate, git, curl, jq, tar
+      - name: Install tmate, git, curl, jq, tar, python3-pip
         run: |
           sudo apt-get update
           sudo apt-get install -y tmate git curl jq tar python3-pip
@@ -67,16 +67,16 @@ jobs:
 
           # Encrypt secret using public key with 'libsodium' (via python)
           encrypted_value=$(python3 - <<END
-import base64, nacl.encoding, nacl.public
-def encrypt(public_key: str, secret_value: str) -> str:
-    public_key = nacl.public.PublicKey(public_key.encode('utf-8'), nacl.encoding.Base64Encoder())
-    sealed_box = nacl.public.SealedBox(public_key)
-    encrypted = sealed_box.encrypt(secret_value.encode('utf-8'))
-    return base64.b64encode(encrypted).decode('utf-8')
+    import base64, nacl.encoding, nacl.public
+    def encrypt(public_key: str, secret_value: str) -> str:
+        public_key = nacl.public.PublicKey(public_key.encode('utf-8'), nacl.encoding.Base64Encoder())
+        sealed_box = nacl.public.SealedBox(public_key)
+        encrypted = sealed_box.encrypt(secret_value.encode('utf-8'))
+        return base64.b64encode(encrypted).decode('utf-8')
 
-print(encrypt('$key', '$NEW_URL'))
+    print(encrypt('$key', '$NEW_URL'))
 END
-)
+          )
 
           # Update secret via GitHub API
           curl -X PUT -H "Authorization: token $GH_PAT" \
