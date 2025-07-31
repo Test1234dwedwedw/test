@@ -1,61 +1,56 @@
-name: 24/7 VPS with Auto Backup & Restore
+name: VPS Auto-Rotate
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */6 * * *'  # Every 6 hours
 
 jobs:
-  vps:
+  run-vps:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout this repo
+
+      - name: ⏬ Clone repo
         uses: actions/checkout@v4
 
-      - name: Set up Tmate session
-        uses: mxschmitt/action-tmate@v3
-        with:
-          limit-access-to-actor: false
+      - name: 📁 Create VPS folder
+        run: mkdir -p ~/vps-data
 
-      - name: Restore backup if exists
+      - name: 🧠 Restore previous backup from transfer.sh
         run: |
-          set -e
-          echo "🔄 Restoring latest backup (if exists)..."
-          curl -s https://raw.githubusercontent.com/Test1234dwedwedw/test/backup/latest.txt -o latest.txt || echo "No latest.txt"
+          wget -q https://raw.githubusercontent.com/${{ github.repository }}/backup/latest.txt -O latest.txt || echo "No previous backup"
           if [ -s latest.txt ]; then
-            url=$(cat latest.txt)
-            curl -L "$url" -o backup.tar.gz
-            mkdir -p /home/runner/vps-data
-            tar -xzf backup.tar.gz -C /home/runner/vps-data
-            echo "✅ Restored backup!"
+            curl -sL $(cat latest.txt) | tar -xz -C ~/vps-data
+            echo "Backup restored!"
           else
-            echo "⚠️ No backup found to restore."
+            echo "No backup found."
           fi
 
-      - name: Start your VPS process (replace this with your command)
+      - name: 🐧 Start VPS (example)
         run: |
-          echo "🖥️ Running your VPS logic here"
-          sleep 3600
+          cd ~/vps-data
+          echo "Running your VPS app here..."
+          nohup bash -c 'while true; do date; sleep 30; done' > log.txt 2>&1 &
 
-      - name: Backup data to transfer.sh
-        if: always()
-        run: |
-          echo "🧠 Backing up data..."
-          mkdir -p /home/runner/vps-data
-          tar -czf backup-$(date +%Y%m%d%H%M%S).tar.gz -C /home/runner/vps-data .
-          backup_url=$(curl --upload-file backup-*.tar.gz https://transfer.sh/backup.tar.gz)
-          echo "$backup_url" > latest.txt
-          echo "📦 Backup uploaded: $backup_url"
+      - name: ⏳ Wait 5 hours 55 mins before backup
+        run: sleep $((5 * 3600 + 55 * 60))  # 5h 55m = 21300 sec
 
-      - name: Push latest.txt to backup branch
-        if: always()
+      - name: 💾 Backup VPS data to transfer.sh
         run: |
-          git config --global user.name "github-actions"
+          cd ~/vps-data
+          tar -czf /tmp/vps-backup.tar.gz .
+          curl --upload-file /tmp/vps-backup.tar.gz https://transfer.sh/vps-backup.tar.gz > link.txt
+          LINK=$(cat link.txt)
+          echo "Transfer.sh link: $LINK"
+          echo "$LINK" > latest.txt
+
+      - name: 🆙 Commit latest.txt to backup branch
+        run: |
           git config --global user.email "actions@github.com"
-          git fetch origin
-          git switch --create backup || git switch backup
-          mv latest.txt backup/latest.txt
-          git add backup/latest.txt
-          git commit -m "Updated latest backup URL"
-          git push origin backup --force
+          git config --global user.name "GitHub Actions"
+          git fetch origin backup
+          git checkout backup || git checkout --orphan backup
+          mv latest.txt latest.txt
+          git add latest.txt
+          git commit -m "Updated backup link"
+          git push --force origin backup
