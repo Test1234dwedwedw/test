@@ -1,0 +1,44 @@
+name: Free VPS with Auto Backup & Restore (Google Drive + tmate)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Auto restart every 6 hours
+  workflow_dispatch:        # Manual start option
+
+jobs:
+  vps:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install tmate and rclone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmate
+          curl https://rclone.org/install.sh | sudo bash
+
+      - name: Setup rclone config
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
+
+      - name: Auto-Restore from Google Drive
+        run: |
+          echo "Restoring data from Google Drive..."
+          mkdir -p ~/vps-data
+          rclone copy gdrive:/vps-data ~/vps-data --progress || echo "No previous backup found."
+
+      - name: Start tmate VPS
+        run: |
+          echo "Starting tmate session..."
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+          echo "🔁 VPS running for 6 hours..."
+          sleep 21600
+
+      - name: Auto-Backup to Google Drive
+        if: always()
+        run: |
+          echo "Backing up data to Google Drive..."
+          rclone copy ~/vps-data gdrive:/vps-data --progress
