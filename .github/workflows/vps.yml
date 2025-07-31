@@ -1,44 +1,60 @@
-name: Free VPS with Auto Backup & Restore (Google Drive + tmate)
+name: Start VPS
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 */6 * * *'  # Auto restart every 6 hours
-  workflow_dispatch:        # Manual start option
 
 jobs:
-  vps:
+  run-vps:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Install tmate and rclone
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tmate
-          curl https://rclone.org/install.sh | sudo bash
 
-      - name: Setup rclone config
-        run: |
-          mkdir -p ~/.config/rclone
-          echo "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
+    - name: Set up Environment
+      run: |
+        sudo apt update
+        sudo apt install -y curl wget unzip nano
 
-      - name: Auto-Restore from Google Drive
-        run: |
-          echo "Restoring data from Google Drive..."
-          mkdir -p ~/vps-data
-          rclone copy gdrive:/vps-data ~/vps-data --progress || echo "No previous backup found."
+    - name: Restore backup from transfer.sh
+      run: |
+        if [ -f backup_link.txt ]; then
+          echo "Restoring backup..."
+          curl -L $(cat backup_link.txt) --output backup.zip
+          unzip -o backup.zip -d ~/mydata
+          echo "✅ Backup restored."
+        else
+          echo "⚠️ No backup_link.txt found."
+        fi
 
-      - name: Start tmate VPS
-        run: |
-          echo "Starting tmate session..."
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          echo "SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
-          echo "Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
-          echo "🔁 VPS running for 6 hours..."
-          sleep 21600
+    - name: Start Cloudflared Tunnel
+      run: |
+        wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        chmod +x cloudflared-linux-amd64
+        mv cloudflared-linux-amd64 cloudflared
+        ./cloudflared tunnel --url ssh://localhost:22 > tunnel.log 2>&1 &
+        sleep 5
+        echo "🌐 Cloudflared tunnel started."
 
-      - name: Auto-Backup to Google Drive
-        if: always()
-        run: |
-          echo "Backing up data to Google Drive..."
-          rclone copy ~/vps-data gdrive:/vps-data --progress
+    - name: Start tmate Session (SSH VPS)
+      uses: mxschmitt/action-tmate@v3
+
+    - name: Zip and Upload to transfer.sh (Auto Backup)
+      if: always()
+      run: |
+        cd ~
+        mkdir -p ~/mydata
+        zip -r backup.zip ~/mydata
+        curl --upload-file ./backup.zip https://transfer.sh/backup.zip > backup_link.txt
+        echo "🔗 Backup Link: $(cat backup_link.txt)"
+
+    - name: Save Backup Link to Repo
+      if: always()
+      run: |
+        git config --global user.email "bot@example.com"
+        git config --global user.name "Backup Bot"
+        git clone https://github.com/${{ github.repository }} repo
+        cd repo
+        cp ~/backup_link.txt .
+        git add backup_link.txt
+        git commit -m "🆕 Updated backup link"
+        git push https://${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }} HEAD:main
