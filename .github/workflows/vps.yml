@@ -1,51 +1,61 @@
-name: Free VPS with GitHub Backup + Stable Tailscale IP + tmate
+name: 24/7 VPS with Auto Backup & Restore
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'  # every 6 hours
+    - cron: '0 */6 * * *'
 
 jobs:
   vps:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
+      - name: Checkout this repo
+        uses: actions/checkout@v4
 
-      - name: Install tmate, git, curl, tar
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tmate git curl tar
+      - name: Set up Tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: false
 
-      - name: Clone backup branch and restore files
+      - name: Restore backup if exists
         run: |
-          git config --global user.name "GitHub VPS"
-          git config --global user.email "vps@example.com"
-          # Try to clone backup branch, if not exists, create empty folder
-          git clone --single-branch --branch backup https://x-access-token:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }} vps-backup || mkdir vps-backup
-          mkdir -p ~/mydata
-          cp -r vps-backup/* ~/mydata || echo "No previous backup found."
+          set -e
+          echo "🔄 Restoring latest backup (if exists)..."
+          curl -s https://raw.githubusercontent.com/Test1234dwedwedw/test/backup/latest.txt -o latest.txt || echo "No latest.txt"
+          if [ -s latest.txt ]; then
+            url=$(cat latest.txt)
+            curl -L "$url" -o backup.tar.gz
+            mkdir -p /home/runner/vps-data
+            tar -xzf backup.tar.gz -C /home/runner/vps-data
+            echo "✅ Restored backup!"
+          else
+            echo "⚠️ No backup found to restore."
+          fi
 
-      - name: Show Tailscale IPv4
-        run: tailscale ip -4
-
-      - name: Start tmate VPS session
+      - name: Start your VPS process (replace this with your command)
         run: |
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-          echo "🔐 SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
-          echo "🌐 Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
-          sleep 21600  # 6 hours session
+          echo "🖥️ Running your VPS logic here"
+          sleep 3600
 
-      - name: Archive and push backup to GitHub
+      - name: Backup data to transfer.sh
+        if: always()
         run: |
-          cd ~
-          tar czf backup.tar.gz mydata
-          rm -rf vps-backup/*
-          tar xf backup.tar.gz -C vps-backup
-          cd vps-backup
-          git add .
-          git commit -m "Auto backup $(date)"
-          git push -f origin backup
+          echo "🧠 Backing up data..."
+          mkdir -p /home/runner/vps-data
+          tar -czf backup-$(date +%Y%m%d%H%M%S).tar.gz -C /home/runner/vps-data .
+          backup_url=$(curl --upload-file backup-*.tar.gz https://transfer.sh/backup.tar.gz)
+          echo "$backup_url" > latest.txt
+          echo "📦 Backup uploaded: $backup_url"
+
+      - name: Push latest.txt to backup branch
+        if: always()
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git fetch origin
+          git switch --create backup || git switch backup
+          mv latest.txt backup/latest.txt
+          git add backup/latest.txt
+          git commit -m "Updated latest backup URL"
+          git push origin backup --force
