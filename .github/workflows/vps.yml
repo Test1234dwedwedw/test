@@ -1,56 +1,73 @@
-name: VPS Auto-Rotate
+name: Free VPS with Stable Tailscale + tmate + Backup
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
+    - cron: '0 */6 * * *'  # every 6 hours
 
 jobs:
-  run-vps:
+  vps:
     runs-on: ubuntu-latest
-    steps:
 
-      - name: ⏬ Clone repo
+    steps:
+      - name: Checkout repo (to push backup)
         uses: actions/checkout@v4
 
-      - name: 📁 Create VPS folder
-        run: mkdir -p ~/vps-data
-
-      - name: 🧠 Restore previous backup from transfer.sh
+      - name: Install Tailscale
         run: |
-          wget -q https://raw.githubusercontent.com/${{ github.repository }}/backup/latest.txt -O latest.txt || echo "No previous backup"
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
+
+      - name: Install tmate, git, curl, jq, tar
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmate git curl jq tar
+
+      - name: Restore backup from transfer.sh
+        run: |
+          mkdir -p ~/vps-data
+          wget -q https://raw.githubusercontent.com/${{ github.repository }}/backup/latest.txt -O latest.txt || echo "No backup link found"
           if [ -s latest.txt ]; then
+            echo "Restoring backup..."
             curl -sL $(cat latest.txt) | tar -xz -C ~/vps-data
-            echo "Backup restored!"
           else
-            echo "No backup found."
+            echo "No backup to restore"
           fi
 
-      - name: 🐧 Start VPS (example)
+      - name: Show stable Tailscale IPv4
+        run: sudo tailscale ip -4
+
+      - name: Start tmate session and keep VPS running
+        id: tmate-session
         run: |
-          cd ~/vps-data
-          echo "Running your VPS app here..."
-          nohup bash -c 'while true; do date; sleep 30; done' > log.txt 2>&1 &
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+          echo "SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
+          echo "Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+          sleep $((5*3600 + 55*60))  # sleep 5h 55m before backup (to avoid race with restart)
 
-      - name: ⏳ Wait 5 hours 55 mins before backup
-        run: sleep $((5 * 3600 + 55 * 60))  # 5h 55m = 21300 sec
-
-      - name: 💾 Backup VPS data to transfer.sh
+      - name: Backup VPS data to transfer.sh
+        id: upload-backup
         run: |
-          cd ~/vps-data
-          tar -czf /tmp/vps-backup.tar.gz .
-          curl --upload-file /tmp/vps-backup.tar.gz https://transfer.sh/vps-backup.tar.gz > link.txt
-          LINK=$(cat link.txt)
-          echo "Transfer.sh link: $LINK"
-          echo "$LINK" > latest.txt
+          tar -czf /tmp/vps-backup.tar.gz -C ~/vps-data .
+          echo "Uploading backup to transfer.sh..."
+          url=$(curl --upload-file /tmp/vps-backup.tar.gz https://transfer.sh/vps-backup.tar.gz)
+          echo "Backup URL: $url"
+          echo "$url" > latest.txt
 
-      - name: 🆙 Commit latest.txt to backup branch
+      - name: Commit and push latest backup link
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git fetch origin backup
+          git fetch origin backup || git checkout --orphan backup
           git checkout backup || git checkout --orphan backup
           mv latest.txt latest.txt
           git add latest.txt
-          git commit -m "Updated backup link"
+          git commit -m "Update backup link $(date)"
           git push --force origin backup
+
+      - name: Output tmate SSH & Web link
+        run: |
+          echo "Your VPS is ready!"
+          echo "Tmate SSH: ${{ steps.tmate-session.outputs.ssh }}"
+          echo "Tmate Web: ${{ steps.tmate-session.outputs.web }}"
