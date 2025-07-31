@@ -34,6 +34,16 @@ jobs:
             echo "No backup to restore"
           fi
 
+      - name: Create 'biralo' user with sudo and set home to ~/vps-data
+        run: |
+          sudo useradd -m -d /home/biralo -s /bin/bash biralo
+          echo 'biralo:biralo' | sudo chpasswd
+          sudo usermod -aG sudo biralo
+          sudo mkdir -p /home/biralo
+          sudo cp -r ~/vps-data/* /home/biralo/ 2>/dev/null || true
+          sudo chown -R biralo:biralo /home/biralo
+          echo "User 'biralo' created with sudo access and home linked to ~/vps-data"
+
       - name: Show stable Tailscale IPv4
         run: sudo tailscale ip -4
 
@@ -42,8 +52,8 @@ jobs:
         run: |
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
-          echo "SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')"
-          echo "Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')"
+          echo "SSH: $(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')" >> $GITHUB_ENV
+          echo "Web: $(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')" >> $GITHUB_ENV
           sleep $((5*3600 + 55*60))  # sleep 5h 55m before backup (to avoid race with restart)
 
       - name: Backup VPS data to transfer.sh
@@ -69,5 +79,5 @@ jobs:
       - name: Output tmate SSH & Web link
         run: |
           echo "Your VPS is ready!"
-          echo "Tmate SSH: ${{ steps.tmate-session.outputs.ssh }}"
-          echo "Tmate Web: ${{ steps.tmate-session.outputs.web }}"
+          echo "Tmate SSH: ${{ env.SSH }}"
+          echo "Tmate Web: ${{ env.Web }}"
