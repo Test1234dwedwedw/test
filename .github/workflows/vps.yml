@@ -8,50 +8,50 @@ on:
 jobs:
   vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
+    timeout-minutes: 360  # 6 hours
 
     steps:
       - name: Checkout repo (for pushing backup)
         uses: actions/checkout@v4
 
-      - name: Remove old tailscale repo and key (if any)
+      - name: Clean old tailscale repo/key if any
         run: |
           sudo rm -f /etc/apt/sources.list.d/tailscale.list
-          sudo rm -f /usr/share/keyrings/tailscale-archive-keyring.gpg
+          sudo rm -f /usr/share/keyrings/tailscale-archive-keyring.gpg || true
 
-      - name: Add tailscale repo and key (Ubuntu 22.04 jammy)
+      - name: Add tailscale repo and GPG key (Ubuntu jammy 22.04)
         run: |
           curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
           echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/tailscale.list
 
-      - name: Update apt and install tailscale, tmate, git, curl, jq, tar
+      - name: Update apt and install packages
         run: |
           sudo apt-get update
           sudo apt-get install -y tailscale tmate git curl jq tar
 
-      - name: Start tailscale
+      - name: Start tailscale with auth key
         env:
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
         run: |
           sudo tailscale up --authkey $TS_AUTHKEY --hostname github-vps
 
-      - name: Create user 'biralo' with sudo and password access
+      - name: Create user 'biralo' with sudo and password
         run: |
-          sudo useradd -m -s /bin/bash biralo
+          sudo useradd -m -s /bin/bash biralo || echo "User biralo already exists"
           echo "biralo:biralo" | sudo chpasswd
           sudo usermod -aG sudo biralo
           echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
 
-      - name: Set default directory to /home/biralo/vps-data on login
+      - name: Setup default login dir to /home/biralo/vps-data
         run: |
           sudo mkdir -p /home/biralo/vps-data
           sudo chown -R biralo:biralo /home/biralo/vps-data
           echo "cd ~/vps-data" | sudo tee -a /home/biralo/.bashrc
 
-      - name: Restore backup to /home/biralo/vps-data
+      - name: Restore backup if available
         run: |
-          git fetch origin backup || echo "Backup branch not found"
-          git checkout backup -- latest.txt || echo "No latest.txt file"
+          git fetch origin backup || echo "No backup branch yet"
+          git checkout backup -- latest.txt || echo "No latest.txt file yet"
           if [ -f latest.txt ]; then
             curl -sL $(cat latest.txt) | tar -xz -C /home/biralo/vps-data
             sudo chown -R biralo:biralo /home/biralo/vps-data
@@ -59,10 +59,10 @@ jobs:
             echo "No backup to restore"
           fi
 
-      - name: Show stable Tailscale IPv4
+      - name: Show Tailscale IP
         run: sudo tailscale ip -4
 
-      - name: Start tmate session and keep VPS running
+      - name: Start tmate session and keep alive for 5h57m
         id: tmate-session
         run: |
           tmate -S /tmp/tmate.sock new-session -d
@@ -71,7 +71,7 @@ jobs:
           web=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
           echo "ssh=$ssh" >> $GITHUB_OUTPUT
           echo "web=$web" >> $GITHUB_OUTPUT
-          sleep $((5*3600 + 57*60))  # Sleep 5h 57m to let backup happen near end
+          sleep $((5*3600 + 57*60))
 
       - name: Backup VPS data to transfer.sh
         run: |
@@ -101,6 +101,6 @@ jobs:
 
       - name: Output tmate SSH & Web link
         run: |
-          echo "✅ Your VPS is ready!"
-          echo "🔐 Tmate SSH: ${{ steps.tmate-session.outputs.ssh }}"
-          echo "🌐 Tmate Web: ${{ steps.tmate-session.outputs.web }}"
+          echo "✅ VPS ready!"
+          echo "🔐 SSH: ${{ steps.tmate-session.outputs.ssh }}"
+          echo "🌐 Web: ${{ steps.tmate-session.outputs.web }}"
