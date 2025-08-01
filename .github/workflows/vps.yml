@@ -8,13 +8,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 357  # 5h 57m
+    timeout-minutes: 357 # ~6 hours
 
     steps:
-      - name: Checkout repo
+      - name: Checkout Repo
         uses: actions/checkout@v3
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
           sudo apt update
           sudo apt install -y tmate curl tar tailscale
@@ -23,14 +23,22 @@ jobs:
         run: |
           tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
 
+      - name: Create user 'biralo' with sudo & home dir
+        run: |
+          sudo useradd -m -s /bin/bash biralo
+          echo "biralo:biralo" | sudo chpasswd
+          sudo usermod -aG sudo biralo
+          echo "User 'biralo' created with password 'biralo'"
+
       - name: Restore backup (if exists)
         run: |
           git fetch origin backup
           git checkout backup -- latest.txt || echo "No latest.txt"
           if [ -f latest.txt ]; then
             curl -o backup.tar.gz "$(cat latest.txt)"
-            mkdir -p /home/runner/vps-data
-            tar -xvzf backup.tar.gz -C /home/runner/vps-data || echo "No backup to restore"
+            mkdir -p /home/biralo/vps-data
+            tar -xvzf backup.tar.gz -C /home/biralo/vps-data || echo "No backup to restore"
+            chown -R biralo:biralo /home/biralo/vps-data
           fi
 
       - name: Start tmate session
@@ -42,12 +50,11 @@ jobs:
           cat ssh.txt
 
       - name: Wait and let VPS run
-        run: |
-          sleep 357m
+        run: sleep 357m
 
       - name: Backup before exit
         run: |
-          tar -czvf backup.tar.gz -C /home/runner/vps-data .
+          tar -czvf backup.tar.gz -C /home/biralo/vps-data .
           curl --upload-file ./backup.tar.gz https://transfer.sh/backup.tar.gz > latest.txt
 
       - name: Push backup to backup branch
