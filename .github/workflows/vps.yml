@@ -1,87 +1,69 @@
-name: Free VPS with Stable Tailscale + tmate + Backup
+name: Free VPS
 
 on:
+  repository_dispatch:
+    types: [create-vps]
   workflow_dispatch:
 
 jobs:
-  vps:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 357  # 5h 57m
 
     steps:
-      - name: Checkout repo (for pushing backup)
-        uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-      - name: Set hostname to Biralo
+      - name: Install dependencies
         run: |
-          sudo hostnamectl set-hostname Biralo
+          sudo apt update
+          sudo apt install -y tmate curl tar tailscale
 
-      - name: Create user 'biralo' with sudo and password access
+      - name: Start Tailscale
         run: |
-          sudo useradd -m -s /bin/bash biralo
-          echo "biralo:biralo" | sudo chpasswd
-          sudo usermod -aG sudo biralo
-          echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
+          tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
 
-      - name: Set default directory to /home/biralo/vps-data on login
+      - name: Restore backup (if exists)
         run: |
-          sudo mkdir -p /home/biralo/vps-data
-          sudo chown -R biralo:biralo /home/biralo/vps-data
-          echo "cd ~/vps-data" | sudo tee -a /home/biralo/.bashrc
-
-      - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
-
-      - name: Install tmate, git, curl, jq, tar
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tmate git curl jq tar
-
-      - name: Restore backup to /home/biralo/vps-data
-        run: |
-          wget -q https://raw.githubusercontent.com/${{ github.repository }}/backup/latest.txt -O latest.txt || echo "No backup link found"
-          if [ -s latest.txt ]; then
-            echo "Restoring backup..."
-            curl -sL $(cat latest.txt) | tar -xz -C /home/biralo/vps-data
-            sudo chown -R biralo:biralo /home/biralo/vps-data
-          else
-            echo "No backup to restore"
+          git fetch origin backup
+          git checkout backup -- latest.txt || echo "No latest.txt"
+          if [ -f latest.txt ]; then
+            curl -o backup.tar.gz "$(cat latest.txt)"
+            mkdir -p /home/runner/vps-data
+            tar -xvzf backup.tar.gz -C /home/runner/vps-data || echo "No backup to restore"
           fi
 
-      - name: Show stable Tailscale IPv4
-        run: sudo tailscale ip -4
-
-      - name: Start tmate session and keep VPS running
-        id: tmate-session
+      - name: Start tmate session
         run: |
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
-          ssh=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          web=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          echo "ssh=$ssh" >> $GITHUB_OUTPUT
-          echo "web=$web" >> $GITHUB_OUTPUT
-          sleep $((5*3600 + 55*60))  # Keep alive
+          tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}' > ssh.txt
+          tmate -S /tmp/tmate.sock display -p '#{tmate_web}' >> ssh.txt
+          cat ssh.txt
 
-      - name: Backup VPS data to transfer.sh
+      - name: Wait and let VPS run
         run: |
-          tar -czf /tmp/vps-backup.tar.gz -C /home/biralo/vps-data .
-          url=$(curl --upload-file /tmp/vps-backup.tar.gz https://transfer.sh/vps-backup.tar.gz)
-          echo "$url" > latest.txt
+          sleep 357m
 
-      - name: Commit and push latest backup link
+      - name: Backup before exit
         run: |
-          git config --global user.email "actions@github.com"
-          git config --global user.name "GitHub Actions"
-          git fetch origin backup || git checkout --orphan backup
-          git checkout backup || git checkout --orphan backup
+          tar -czvf backup.tar.gz -C /home/runner/vps-data .
+          curl --upload-file ./backup.tar.gz https://transfer.sh/backup.tar.gz > latest.txt
+
+      - name: Push backup to backup branch
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@users.noreply.github.com"
+          git fetch origin
+          git switch --force-create backup
           mv latest.txt latest.txt
           git add latest.txt
-          git commit -m "Update backup link $(date)"
-          git push --force origin backup
+          git commit -m "Auto backup on rotation"
+          git push origin backup --force
 
-      - name: Output tmate SSH & Web link
+      - name: Trigger next VPS
         run: |
-          echo "✅ Your VPS is ready!"
-          echo "🔐 Tmate SSH: ${{ steps.tmate-session.outputs.ssh }}"
-          echo "🌐 Tmate Web: ${{ steps.tmate-session.outputs.web }}"
+          curl -X POST -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d '{"event_type":"create-vps"}'
