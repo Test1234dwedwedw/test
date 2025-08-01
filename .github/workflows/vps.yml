@@ -1,11 +1,9 @@
-name: Free VPS with Stable Tailscale + tmate + Backup + Auto Rotate
+name: Free VPS Rotation with Stable Tailscale + tmate + Backup
 
 on:
   repository_dispatch:
     types: [create-vps]
   workflow_dispatch:
-  schedule:
-    - cron: '0 */6 * * *'  # every 6 hours
 
 jobs:
   vps:
@@ -16,76 +14,65 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set hostname to Biralo
+      - name: Install tailscale and dependencies (fixed GPG key for jammy)
         run: |
-          sudo hostnamectl set-hostname Biralo
+          sudo rm -f /etc/apt/sources.list.d/tailscale.list
+          sudo rm -f /usr/share/keyrings/tailscale-archive-keyring.gpg
 
-      - name: Create user 'biralo' with sudo and password 'biralo'
-        run: |
-          sudo useradd -m -s /bin/bash biralo || echo "User biralo already exists"
-          echo "biralo:biralo" | sudo chpasswd
-          sudo usermod -aG sudo biralo
-          echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
-          sudo mkdir -p /home/biralo/vps-data
-          sudo chown -R biralo:biralo /home/biralo/vps-data
-          echo "cd ~/vps-data" | sudo tee -a /home/biralo/.bashrc
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+          echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main" | sudo tee /etc/apt/sources.list.d/tailscale.list
 
-      - name: Install tailscale (with GPG key fix)
-        run: |
-          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/focal.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-          echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu focal main" | sudo tee /etc/apt/sources.list.d/tailscale.list
           sudo apt-get update
-          sudo apt-get install -y tailscale
+          sudo apt-get install -y tailscale tmate curl tar jq
 
       - name: Start tailscale
         run: |
           sudo tailscale up --authkey ${{ secrets.TS_AUTHKEY }} --hostname github-vps
 
-      - name: Install tmate, git, curl, jq, tar
+      - name: Restore backup from backup branch if exists
         run: |
-          sudo apt-get install -y tmate git curl jq tar
-
-      - name: Restore backup if exists
-        run: |
-          wget -q https://raw.githubusercontent.com/${{ github.repository }}/backup/latest.txt -O latest.txt || echo "No latest.txt found"
-          if [ -s latest.txt ]; then
-            echo "Restoring backup from transfer.sh..."
-            curl -sL $(cat latest.txt) | tar -xz -C /home/biralo/vps-data
-            sudo chown -R biralo:biralo /home/biralo/vps-data
+          git fetch origin backup || echo "No backup branch"
+          git checkout backup -- latest.txt || echo "No latest.txt"
+          if [ -f latest.txt ]; then
+            echo "Restoring backup..."
+            curl -o backup.tar.gz "$(cat latest.txt)"
+            mkdir -p ~/vps-data
+            tar -xzf backup.tar.gz -C ~/vps-data || echo "No backup archive"
           else
-            echo "No backup to restore"
+            echo "No backup link to restore"
           fi
 
-      - name: Show stable Tailscale IPv4
-        run: sudo tailscale ip -4
-
-      - name: Start tmate session and keep VPS running
+      - name: Start tmate session
         id: tmate-session
         run: |
           tmate -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
-          ssh=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          web=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
-          echo "ssh=$ssh" >> $GITHUB_OUTPUT
-          echo "web=$web" >> $GITHUB_OUTPUT
-          sleep $((5*3600 + 57*60))  # 5h 57m sleep before backup (to avoid race with restart)
+          ssh_url=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          web_url=$(tmate -S /tmp/tmate.sock display -p '#{tmate_web}')
+          echo "ssh=$ssh_url" >> $GITHUB_OUTPUT
+          echo "web=$web_url" >> $GITHUB_OUTPUT
+          echo "SSH URL: $ssh_url"
+          echo "Web URL: $web_url"
 
-      - name: Backup VPS data to transfer.sh
+      - name: Sleep for 5 hours 57 minutes
+        run: sleep $((5*3600 + 57*60))
+
+      - name: Backup vps-data and upload to transfer.sh
         run: |
-          tar -czf /tmp/vps-backup.tar.gz -C /home/biralo/vps-data .
+          tar -czf /tmp/vps-backup.tar.gz -C ~/vps-data .
           url=$(curl --upload-file /tmp/vps-backup.tar.gz https://transfer.sh/vps-backup.tar.gz)
           echo "$url" > latest.txt
+          echo "Backup uploaded to: $url"
 
-      - name: Commit and push latest backup link
+      - name: Commit and push latest backup link to backup branch
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git fetch origin backup || git checkout --orphan backup
-          git checkout backup || git checkout --orphan backup
-          mv latest.txt latest.txt
+          git fetch origin
+          git switch --force-create backup
           git add latest.txt
-          git commit -m "Auto backup on rotation $(date)"
-          git push --force origin backup
+          git commit -m "Auto backup on $(date)"
+          git push origin backup --force
 
       - name: Trigger next VPS run
         run: |
@@ -93,9 +80,3 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
             https://api.github.com/repos/${{ github.repository }}/dispatches \
             -d '{"event_type":"create-vps"}'
-
-      - name: Output tmate SSH & Web link
-        run: |
-          echo "✅ Your VPS is ready!"
-          echo "🔐 Tmate SSH: ${{ steps.tmate-session.outputs.ssh }}"
-          echo "🌐 Tmate Web: ${{ steps.tmate-session.outputs.web }}"
